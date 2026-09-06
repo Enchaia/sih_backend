@@ -14,9 +14,11 @@ from config import (
     NIGHT_CONFIDENCE_RELAXATION, DRIVER_ALERT_CLASSES,
     FRAMES_DIR, MANIFEST_JSON, OUTPUT_JSON, EVENTS_DIR,
     DEDUP_RADIUS_METERS, DEDUP_TIME_WINDOW_SEC,
-    RETRY_ATTEMPTS, QUEUE_FILE,
+    RETRY_ATTEMPTS, QUEUE_FILE, PLATES_OUTPUT_JSON,   # ← added PLATES_OUTPUT_JSON
 )
-from geo_utils import haversine_m  # make sure this filename matches the actual file in your project
+from geo_utils import haversine_m
+from anpr import process_accident_frame, save_plates   # ← this whole line is new
+
 
 # Thread-safe collection of frames that failed even after retries
 _pending_lock = threading.Lock()
@@ -202,6 +204,35 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
         json.dump(events, f, indent=2)
 
     print(f"\nDone: {total_detections} detections, {len(events)} unique hazard events.")
+
+
+    # ---- ANPR: only for confirmed "Accident" events ----
+    accident_events = [e for e in events if e["class"] == "Accident"]
+    if accident_events:
+        unique_id_to_filepath = {
+            meta.get("unique_id"): os.path.join(frames_dir, meta["filename"])
+            for meta in manifest.values()
+        }
+
+        all_plates = []
+        for event in accident_events:
+            frame_path = unique_id_to_filepath.get(event.get("representative_frame"))
+            if not frame_path or not os.path.exists(frame_path):
+                print(f"Skipping ANPR for accident {event['event_id'][:8]}... "
+                      f"(representative frame not found on disk)")
+                continue
+
+            frame_meta = {
+                "unique_id": event["representative_frame"],
+                "timestamp": event["timestamp"],
+                "location": event["location"],
+            }
+            plates = process_accident_frame(frame_path, frame_meta, event["event_id"])
+            all_plates.extend(plates)
+
+        save_plates(all_plates)
+    # ---- end ANPR ----
+    
 
     if _pending_frames:
         queue_path = os.path.join(frames_dir, QUEUE_FILE)

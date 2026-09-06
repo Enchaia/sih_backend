@@ -26,6 +26,14 @@ MODEL_CONFIGS = [
     {"name": "traffic_light", "api_key": os.environ.get("ROBOFLOW_API_KEY_2"), "workspace": "sibika", "project": "traffic-light-detection-yo9o4-3o2hz", "version": 2},
 ]
 
+ANPR_MODEL_CONFIG = {
+    "name": "anpr_plate_detector",
+    "api_key": os.environ.get("ROBOFLOW_API_KEY_ANPR"),
+    "workspace": "lethargic-wanderer",   # ← from your ANPR project's URL
+    "project": "anpr-model",       # ← from your ANPR project's URL
+    "version": 1,                          # ← from your ANPR project's URL
+}
+
 OVERLAP = 30
 MAX_WORKERS = 8  # total parallel API calls across BOTH models combined
 

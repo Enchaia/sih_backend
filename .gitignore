@@ -4,3 +4,4 @@ frames/
 __pycache__/
 *.pyc
 ocr.zip
+*.json
