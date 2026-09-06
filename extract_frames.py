@@ -9,6 +9,7 @@ of that:
 - writes a metadata manifest (unique id, real timestamp, location, lens
   status) alongside the frames, so the detection stage doesn't have to
   recompute any of this later
+- optionally overlays metadata text onto the saved frames (if overlay_metadata=True)
 
 No frame-similarity redundancy check here anymore — at fps_target=3,
 consecutive sampled frames are far enough apart in time that a fixed
@@ -27,7 +28,7 @@ from config import (
     FRAMES_DIR, MANIFEST_JSON, CONSECUTIVE_DEGRADED_ALERT,
 )
 from frame_quality import lens_health
-from route_geo import SimulatedRouteLocationProvider
+from bus_location_provider import BusLocationProvider   # <-- changed import
 
 
 def auto_brighten_clahe(frame, clip_limit=CLAHE_CLIP_LIMIT, tile_grid_size=CLAHE_TILE_GRID_SIZE):
@@ -40,20 +41,47 @@ def auto_brighten_clahe(frame, clip_limit=CLAHE_CLIP_LIMIT, tile_grid_size=CLAHE
     return cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
 
 
+def overlay_metadata(frame, timestamp_str, lat, lon, source, bus_id=None, zone=None):
+    """Draw metadata text on the frame."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.6
+    thickness = 2
+    color = (0, 255, 0)  # green
+
+    lines = [
+        f"Time : {timestamp_str}",
+        f"Lat  : {lat:.6f}",
+        f"Lon  : {lon:.6f}",
+        f"Source: {source}",
+    ]
+    if bus_id:
+        lines.append(f"Bus  : {bus_id}")
+    if zone:
+        lines.append(f"Zone : {zone}")
+
+    y0 = 30
+    dy = 25
+    for i, line in enumerate(lines):
+        y = y0 + i * dy
+        cv2.putText(frame, line, (10, y), font, font_scale, color, thickness, cv2.LINE_AA)
+    return frame
+
+
 def extract_frames(video_path, output_dir=FRAMES_DIR, fps_target=FPS_TARGET,
-                    location_provider=None, video_start_time=None):
+                   location_provider=None, video_start_time=None,
+                   overlay_metadata=False):
     """
     location_provider: anything with .get_location(progress_fraction) -> dict.
-        Defaults to SimulatedRouteLocationProvider for offline test videos.
-        For the real bus, wrap a route_geo.GPSLocationProvider so the call
-        signature still matches (progress -> real elapsed seconds).
+        Defaults to BusLocationProvider (uses bus_data.json).
     video_start_time: real-world datetime the video/recording started.
         Defaults to "now" — pass the actual capture start time for real runs
         so manifest timestamps reflect when the footage was actually shot,
         not when you happened to run this script.
+    overlay_metadata: if True, draws timestamp, coordinates, source, and
+        optional bus/zone on the saved frames.
     """
     os.makedirs(output_dir, exist_ok=True)
-    location_provider = location_provider or SimulatedRouteLocationProvider()
+    location_provider = location_provider or BusLocationProvider()   # <-- changed default
     video_start_time = video_start_time or datetime.now()
 
     cap = cv2.VideoCapture(video_path)
@@ -81,6 +109,16 @@ def extract_frames(video_path, output_dir=FRAMES_DIR, fps_target=FPS_TARGET,
             location = location_provider.get_location(progress)
             elapsed_sec = frame_count / video_fps
             capture_time = video_start_time + timedelta(seconds=elapsed_sec)
+            timestamp_str = capture_time.strftime("%Y-%m-%d %H:%M:%S")
+
+            # Overlay metadata if requested
+            if overlay_metadata and location:
+                lat = location.get("lat", 0.0)
+                lon = location.get("lon", 0.0)
+                source = location.get("source", "unknown")
+                bus_id = location.get("bus_id")
+                zone = location.get("zone")
+                enhanced = overlay_metadata(enhanced, timestamp_str, lat, lon, source, bus_id, zone)
 
             filename = f"frame_{saved_count:05d}.jpg"
             filepath = os.path.join(output_dir, filename)

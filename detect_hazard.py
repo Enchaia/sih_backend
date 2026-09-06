@@ -36,7 +36,7 @@ from config import (
     DEDUP_RADIUS_METERS, DEDUP_TIME_WINDOW_SEC,
     RETRY_ATTEMPTS, QUEUE_FILE,
 )
-from route_geo import haversine_m
+from geo_utils import haversine_m
 
 # Thread-safe collection of frames that failed even after retries
 _pending_lock = threading.Lock()
