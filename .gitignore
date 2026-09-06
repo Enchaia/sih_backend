@@ -3,3 +3,4 @@ venv/
 frames/
 __pycache__/
 *.pyc
+ocr.zip
