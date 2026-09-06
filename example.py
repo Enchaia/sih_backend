@@ -5,13 +5,19 @@ Usage:
     python example.py --video path/to/video.mp4 [--zone "Old Delhi"] [--fps 2] [--bus-data bus_data.json] [--start-time "2026-09-06T10:00:00"]
 
 If --zone is omitted, a random bus is chosen.
-If --start-time is not given, the bus's timestamp from the JSON is used as the video start time.
+If --start-time is not given, the CURRENT real-world time (converted to IST)
+is used as the video start time — not a static value from the JSON file.
+This means every run reflects "now", regardless of what machine/timezone
+the script is actually executed on.
 """
 
 import argparse
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from extract_frames import extract_frames
 from bus_location_provider import BusLocationProvider
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def main():
@@ -30,12 +36,12 @@ def main():
     if args.start_time:
         video_start = datetime.fromisoformat(args.start_time)
     else:
-        # Use the bus's timestamp from the data
-        bus_time_str = provider.bus["timestamp"].replace('Z', '+00:00')
-        video_start = datetime.fromisoformat(bus_time_str).replace(tzinfo=None)
+        # Dynamic: always "right now", correctly converted to IST regardless
+        # of the server/machine's own local timezone setting.
+        video_start = datetime.now(IST).replace(tzinfo=None)
 
     print(f"Using bus {provider.bus['bus_id']} in zone {provider.bus['zone']}")
-    print(f"Video start time: {video_start.isoformat()}")
+    print(f"Video start time (IST, live): {video_start.isoformat()}")
 
     # Run extraction with metadata overlay enabled
     extract_frames(
@@ -43,7 +49,7 @@ def main():
         fps_target=args.fps,
         location_provider=provider,
         video_start_time=video_start,
-        overlay_metadata=True
+        draw_overlay=True
     )
 
 

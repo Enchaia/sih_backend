@@ -23,4 +23,7 @@ def lens_health(frame, threshold=BLUR_VARIANCE_THRESHOLD):
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     variance = cv2.Laplacian(gray, cv2.CV_64F).var()
-    return variance < threshold, round(float(variance), 2)
+    is_degraded = bool(variance < threshold)  # cast away numpy.bool_ -> native Python bool
+    return is_degraded, round(float(variance), 2)
+ 
+

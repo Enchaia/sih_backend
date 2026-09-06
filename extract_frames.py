@@ -149,4 +149,4 @@ def extract_frames(video_path, output_dir=FRAMES_DIR, fps_target=FPS_TARGET,
 
 
 if __name__ == "__main__":
-    extract_frames("garbage_and_waterlog.mp4")
+    extract_frames("dashcam.mp4")

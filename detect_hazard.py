@@ -1,7 +1,9 @@
 import os
 import json
 import uuid
+import io
 import threading
+import contextlib
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from roboflow import Roboflow
@@ -24,12 +26,31 @@ _pending_frames = []
 def load_models():
     """Load all configured Roboflow models once, return as a dict keyed by
     name. Each model gets its OWN Roboflow client, since they may live under
-    different workspaces with different API keys."""
+    different workspaces with different API keys.
+
+    Uses version.models() instead of the deprecated version.model attribute,
+    which can silently return None even when a trained model exists.
+    """
     models = {}
     for cfg in MODEL_CONFIGS:
-        rf = Roboflow(api_key=cfg["api_key"])
-        project = rf.workspace(cfg["workspace"]).project(cfg["project"])
-        models[cfg["name"]] = project.version(cfg["version"]).model
+        with contextlib.redirect_stdout(io.StringIO()):
+            rf = Roboflow(api_key=cfg["api_key"])
+            project = rf.workspace(cfg["workspace"]).project(cfg["project"])
+            version = project.version(cfg["version"])
+            available = version.models()
+
+        if not available:
+            raise RuntimeError(
+                f"No trained model found for '{cfg['name']}' "
+                f"({cfg['workspace']}/{cfg['project']}/v{cfg['version']}). "
+                f"Check the Models tab on Roboflow for this project."
+            )
+
+        # available is expected to be a list of trained model objects on
+        # this version — take the first one unless you have multiple and
+        # need to pick a specific one.
+        models[cfg["name"]] = available[0]
+
     return models
 
 
@@ -97,18 +118,27 @@ def predict_with_model(model_name, model, filepath, timestamp_str=None):
     """
     for attempt in range(RETRY_ATTEMPTS):
         try:
-            prediction = model.predict(
-                filepath, confidence=API_REQUEST_CONFIDENCE, overlap=OVERLAP
-            ).json()
+            with contextlib.redirect_stdout(io.StringIO()):
+                prediction = model.predict(
+                    filepath, confidence=API_REQUEST_CONFIDENCE, overlap=OVERLAP
+                ).json()
             raw_detections = prediction.get("predictions", [])
             for d in raw_detections:
                 d["source_model"] = model_name
 
             check_driver_alerts(raw_detections)
             filtered = filter_by_class_confidence(raw_detections, timestamp_str)
+
+            # Only print when something actually cleared its threshold
+            if filtered:
+                for d in filtered:
+                    print(f"🚧 {d['class']} detected ({d['confidence']*100:.0f}%) "
+                          f"in {os.path.basename(filepath)} [{model_name}]")
+
             return os.path.basename(filepath), model_name, filtered
 
         except Exception as e:
+            # Keep failure visibility — these matter even in quiet mode
             print(f"Attempt {attempt+1}/{RETRY_ATTEMPTS} failed for {filepath} with {model_name}: {e}")
             if attempt < RETRY_ATTEMPTS - 1:
                 import time
@@ -135,11 +165,6 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
         return
 
     total_tasks = len(filepaths) * len(models)
-    print(f"Sending {len(filepaths)} frames to {len(models)} models "
-          f"({total_tasks} total API calls, {max_workers} parallel workers)...")
-    print(f"API request floor: {API_REQUEST_CONFIDENCE}% | "
-          f"per-class thresholds applied locally: {CLASS_CONFIDENCE_THRESHOLDS}")
-
     all_results = {os.path.basename(fp): [] for fp in filepaths}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -153,7 +178,6 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
                 future = executor.submit(predict_with_model, model_name, model, fp, frame_timestamp)
                 futures[future] = (fp, model_name)
 
-        completed = 0
         for future in as_completed(futures):
             filename, model_name, detections = future.result()
             meta = manifest.get(filename, {})
@@ -164,20 +188,12 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
                 d["location"] = meta.get("location")
                 d["lens_degraded"] = meta.get("lens_degraded")
             all_results[filename].extend(detections)
-            completed += 1
-            if detections:
-                classes = [f"{d['class']} ({d['confidence']*100:.0f}%)" for d in detections]
-                print(f"[{completed}/{total_tasks}] {filename} ({model_name}): {classes}")
-            else:
-                print(f"[{completed}/{total_tasks}] {filename} ({model_name}): nothing above threshold")
 
     sorted_results = {k: all_results[k] for k in sorted(all_results.keys())}
     with open(output_json, "w") as f:
         json.dump(sorted_results, f, indent=2)
 
     total_detections = sum(len(v) for v in sorted_results.values())
-    print(f"\nDone. {total_detections} total hazard detections across {len(filepaths)} frames "
-          f"(combined from {len(models)} models).")
 
     events = dedup_to_events(sorted_results)
     os.makedirs(EVENTS_DIR, exist_ok=True)
@@ -185,16 +201,13 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
     with open(events_path, "w") as f:
         json.dump(events, f, indent=2)
 
-    print(f"Collapsed into {len(events)} deduplicated hazard events -> {events_path}")
-    print(f"Raw per-frame results saved to {output_json}")
+    print(f"\nDone: {total_detections} detections, {len(events)} unique hazard events.")
 
     if _pending_frames:
         queue_path = os.path.join(frames_dir, QUEUE_FILE)
         with open(queue_path, "w") as f:
             json.dump(_pending_frames, f, indent=2)
-        print(f"Saved {len(_pending_frames)} pending frames to {queue_path}")
-    else:
-        print("No pending frames (all API calls succeeded).")
+        print(f"{len(_pending_frames)} frames failed and were queued for retry -> {queue_path}")
 
 
 def dedup_to_events(sorted_results):
