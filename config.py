@@ -11,24 +11,63 @@ against, so treat these as a first pass and adjust after watching how they
 behave on your 3-4 test videos.
 """
 
-# ---- Roboflow model config (unchanged values, new structure) ----
-API_KEY = "YOUR_API_KEY"
-
 # Fill in the workspace + project slugs for your two trained models shown in
 # your Roboflow dashboard:
 #   - "debr-road-water-pot-traffic-1-yolo11n-t1"  -> the combined defect model
 #   - "traffic-light-7auyu-wdg0w-1-yolo11n-t1"    -> the traffic-light model
 # The dashboard "Name"/"ID" columns are display names, not necessarily the
-# exact slug the SDK needs — check the project's own page/URL for the slug.
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()  # reads .env file and loads its values into environment variables/URL for the slug.
 MODEL_CONFIGS = [
-    {"name": "defect_multiclass", "workspace": "your-workspace-name", "project": "project-one", "version": 1},
-    {"name": "traffic_light", "workspace": "your-workspace-name", "project": "project-two", "version": 1},
+    {"name": "mix_class", "api_key": os.environ.get("ROBOFLOW_API_KEY_1"), "workspace": "sanskar-s-workspace", "project": "debr-road-water-pot-traffic", "version": 1},
+    {"name": "traffic_light", "api_key": os.environ.get("ROBOFLOW_API_KEY_2"), "workspace": "sibika", "project": "traffic-light-detection-yo9o4-3o2hz", "version": 2},
 ]
 
-CONFIDENCE = 40
 OVERLAP = 30
 MAX_WORKERS = 8  # total parallel API calls across BOTH models combined
 
+# Roboflow's API still needs ONE confidence value per request (it's a
+# request parameter, not per-class), so we send a low floor to the API to
+# make sure we don't lose anything, then filter more strictly per-class
+# afterward using this table. Add/adjust class names to match exactly what
+# your models output (check a sample prediction's "class" field if unsure).
+API_REQUEST_CONFIDENCE = 25  # low floor sent to Roboflow itself — filtering happens locally after
+ 
+CLASS_CONFIDENCE_THRESHOLDS = {
+    "Pothole": 65,
+    "water_logging": 60,
+    "debris": 55,
+    "garbage": 60,
+    "garbage-overflow": 60,
+    "Accident": 40,
+    "traffic_light": 60,
+}
+DEFAULT_CLASS_CONFIDENCE = 50 
+
+# Optional: relax every threshold slightly at night, since low light makes
+# even real detections score lower confidence than the same object in
+# daylight. Subtracted from the class threshold when timestamp hour is
+# within NIGHT_HOURS. Tune this after watching real night footage.
+
+NIGHT_HOURS = range(19, 6)  # 7 PM to 6 AM, wraps past midnight — handled in code, not by this range directly
+NIGHT_CONFIDENCE_RELAXATION = 10
+ 
+# ---- Driver alert signs (new) ----
+# These aren't "hazards" in the pothole/accident sense — they're regulatory
+# signs the driver needs to be actively reminded of the moment they're seen.
+# Kept in a separate table from CLASS_CONFIDENCE_THRESHOLDS so their alert
+# logic (immediate audio/visual cue) can be handled differently from
+# hazard logging/dedup.
+
+DRIVER_ALERT_CLASSES = {
+    "Stop": {"confidence": 60, "message": "STOP sign ahead"},
+    "Speed_Limit_120": {"confidence": 55, "message": "Speed limit 120 ahead"},
+    "Speed_Limit_90": {"confidence": 55, "message": "Speed limit 90 ahead"},
+    "Speed_Limit_40": {"confidence": 55, "message": "Speed limit 40 ahead"},
+}
 # ---- Frame extraction (unchanged) ----
 FPS_TARGET = 3
 CLAHE_CLIP_LIMIT = 2.0

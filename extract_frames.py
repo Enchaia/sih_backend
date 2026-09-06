@@ -69,7 +69,7 @@ def overlay_metadata(frame, timestamp_str, lat, lon, source, bus_id=None, zone=N
 
 def extract_frames(video_path, output_dir=FRAMES_DIR, fps_target=FPS_TARGET,
                    location_provider=None, video_start_time=None,
-                   overlay_metadata=False):
+                   draw_overlay=False):
     """
     location_provider: anything with .get_location(progress_fraction) -> dict.
         Defaults to BusLocationProvider (uses bus_data.json).
@@ -112,7 +112,7 @@ def extract_frames(video_path, output_dir=FRAMES_DIR, fps_target=FPS_TARGET,
             timestamp_str = capture_time.strftime("%Y-%m-%d %H:%M:%S")
 
             # Overlay metadata if requested
-            if overlay_metadata and location:
+            if draw_overlay and location:
                 lat = location.get("lat", 0.0)
                 lon = location.get("lon", 0.0)
                 source = location.get("source", "unknown")

@@ -1,27 +1,3 @@
-"""
-Detection stage.
-
-Same two-model, parallel-API-call design as your original detect_hazard.py
-— unchanged: same CONFIDENCE, OVERLAP, MAX_WORKERS. New on top of that:
-
-- reads the manifest written by extract_frames.py, so every detection is
-  tagged with the frame's real unique id, timestamp, and location
-- handles network gaps: retries the API call a few times, and if it still
-  fails, the frame is saved to a queue file (`pending_frames.json`) to be
-  processed later when connectivity returns (store-and-forward)
-- collapses repeated detections of the same hazard across consecutive
-  frames into one event instead of one alert per frame
-
-Honest caveat: model.predict() below still calls Roboflow's hosted API per
-frame, which means detection itself needs internet the whole time. That's
-fine for testing, but it does NOT satisfy "must keep detecting through
-network gaps" — for real offline operation you'd export these two trained
-models (Roboflow supports exporting YOLOv11 weights) and run inference
-locally via ultralytics/ONNX instead of the hosted API. The queue mechanism
-here ensures no data is lost during outages, but detection still requires
-online access when the queue is processed.
-"""
-
 import os
 import json
 import uuid
@@ -31,12 +7,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from roboflow import Roboflow
 
 from config import (
-    API_KEY, MODEL_CONFIGS, CONFIDENCE, OVERLAP, MAX_WORKERS,
+    MODEL_CONFIGS, API_REQUEST_CONFIDENCE, OVERLAP, MAX_WORKERS,
+    CLASS_CONFIDENCE_THRESHOLDS, DEFAULT_CLASS_CONFIDENCE,
+    NIGHT_CONFIDENCE_RELAXATION, DRIVER_ALERT_CLASSES,
     FRAMES_DIR, MANIFEST_JSON, OUTPUT_JSON, EVENTS_DIR,
     DEDUP_RADIUS_METERS, DEDUP_TIME_WINDOW_SEC,
     RETRY_ATTEMPTS, QUEUE_FILE,
 )
-from geo_utils import haversine_m
+from geo_utils import haversine_m  # make sure this filename matches the actual file in your project
 
 # Thread-safe collection of frames that failed even after retries
 _pending_lock = threading.Lock()
@@ -44,10 +22,12 @@ _pending_frames = []
 
 
 def load_models():
-    """Load all configured Roboflow models once, return as a dict keyed by name. (unchanged)"""
-    rf = Roboflow(api_key=API_KEY)
+    """Load all configured Roboflow models once, return as a dict keyed by
+    name. Each model gets its OWN Roboflow client, since they may live under
+    different workspaces with different API keys."""
     models = {}
     for cfg in MODEL_CONFIGS:
+        rf = Roboflow(api_key=cfg["api_key"])
         project = rf.workspace(cfg["workspace"]).project(cfg["project"])
         models[cfg["name"]] = project.version(cfg["version"]).model
     return models
@@ -63,26 +43,76 @@ def load_manifest(frames_dir):
     return {e["filename"]: e for e in entries}
 
 
-def predict_with_model(model_name, model, filepath):
-    """Send one frame to ONE model with retries, tag each detection.
+def is_nighttime(timestamp_str):
+    """Returns True if the given ISO timestamp falls between 7 PM and 6 AM."""
+    if not timestamp_str:
+        return False
+    hour = datetime.fromisoformat(timestamp_str).hour
+    return hour >= 19 or hour < 6
+
+
+def required_confidence_for(class_name, timestamp_str=None):
+    """Look up this class's minimum confidence, relaxed slightly at night."""
+    threshold = CLASS_CONFIDENCE_THRESHOLDS.get(class_name, DEFAULT_CLASS_CONFIDENCE)
+    if is_nighttime(timestamp_str):
+        threshold -= NIGHT_CONFIDENCE_RELAXATION
+    return threshold
+
+
+def filter_by_class_confidence(detections, timestamp_str=None):
+    """Keep only detections that meet their OWN class's confidence bar."""
+    kept = []
+    for d in detections:
+        confidence_pct = d["confidence"] * 100  # Roboflow returns 0-1
+        min_required = required_confidence_for(d["class"], timestamp_str)
+        if confidence_pct >= min_required:
+            d["threshold_used"] = min_required
+            kept.append(d)
+    return kept
+
+
+def check_driver_alerts(detections):
+    """Fire an immediate driver alert for sign classes (stop, speed-limit),
+    independent of the hazard confidence table above."""
+    for d in detections:
+        class_name = d["class"]
+        confidence_pct = d["confidence"] * 100
+        if class_name in DRIVER_ALERT_CLASSES:
+            alert_cfg = DRIVER_ALERT_CLASSES[class_name]
+            if confidence_pct >= alert_cfg["confidence"]:
+                trigger_alert(alert_cfg["message"], class_name, confidence_pct)
+
+
+def trigger_alert(message, class_name, confidence_pct):
+    """Replace with real audio/dashboard/buzzer logic once you have hardware."""
+    print(f"🔔 DRIVER ALERT: {message} (confidence: {confidence_pct:.0f}%)")
+
+
+def predict_with_model(model_name, model, filepath, timestamp_str=None):
+    """Send one frame to ONE model with retries, filter by per-class
+    confidence, and check for driver-alert signs.
 
     Returns (filename, model_name, detections). On final failure, the frame
     is added to the pending queue and detections is empty.
     """
-    last_exception = None
     for attempt in range(RETRY_ATTEMPTS):
         try:
-            prediction = model.predict(filepath, confidence=CONFIDENCE, overlap=OVERLAP).json()
-            detections = prediction.get("predictions", [])
-            for d in detections:
+            prediction = model.predict(
+                filepath, confidence=API_REQUEST_CONFIDENCE, overlap=OVERLAP
+            ).json()
+            raw_detections = prediction.get("predictions", [])
+            for d in raw_detections:
                 d["source_model"] = model_name
-            return os.path.basename(filepath), model_name, detections
+
+            check_driver_alerts(raw_detections)
+            filtered = filter_by_class_confidence(raw_detections, timestamp_str)
+            return os.path.basename(filepath), model_name, filtered
+
         except Exception as e:
-            last_exception = e
             print(f"Attempt {attempt+1}/{RETRY_ATTEMPTS} failed for {filepath} with {model_name}: {e}")
             if attempt < RETRY_ATTEMPTS - 1:
                 import time
-                time.sleep(2 ** attempt)  # simple exponential backoff
+                time.sleep(2 ** attempt)  # exponential backoff
 
     # All retries failed → add to pending queue
     with _pending_lock:
@@ -107,14 +137,20 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
     total_tasks = len(filepaths) * len(models)
     print(f"Sending {len(filepaths)} frames to {len(models)} models "
           f"({total_tasks} total API calls, {max_workers} parallel workers)...")
+    print(f"API request floor: {API_REQUEST_CONFIDENCE}% | "
+          f"per-class thresholds applied locally: {CLASS_CONFIDENCE_THRESHOLDS}")
 
     all_results = {os.path.basename(fp): [] for fp in filepaths}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
         for fp in filepaths:
+            filename = os.path.basename(fp)
+            meta = manifest.get(filename, {})
+            frame_timestamp = meta.get("timestamp")  # now real, from extract_frames.py's manifest
+
             for model_name, model in models.items():
-                future = executor.submit(predict_with_model, model_name, model, fp)
+                future = executor.submit(predict_with_model, model_name, model, fp, frame_timestamp)
                 futures[future] = (fp, model_name)
 
         completed = 0
@@ -130,17 +166,17 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
             all_results[filename].extend(detections)
             completed += 1
             if detections:
-                classes = [d["class"] for d in detections]
+                classes = [f"{d['class']} ({d['confidence']*100:.0f}%)" for d in detections]
                 print(f"[{completed}/{total_tasks}] {filename} ({model_name}): {classes}")
             else:
-                print(f"[{completed}/{total_tasks}] {filename} ({model_name}): nothing detected")
+                print(f"[{completed}/{total_tasks}] {filename} ({model_name}): nothing above threshold")
 
     sorted_results = {k: all_results[k] for k in sorted(all_results.keys())}
     with open(output_json, "w") as f:
         json.dump(sorted_results, f, indent=2)
 
     total_detections = sum(len(v) for v in sorted_results.values())
-    print(f"\nDone. {total_detections} total raw hazard detections across {len(filepaths)} frames "
+    print(f"\nDone. {total_detections} total hazard detections across {len(filepaths)} frames "
           f"(combined from {len(models)} models).")
 
     events = dedup_to_events(sorted_results)
@@ -152,7 +188,6 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
     print(f"Collapsed into {len(events)} deduplicated hazard events -> {events_path}")
     print(f"Raw per-frame results saved to {output_json}")
 
-    # Write pending frames queue (if any)
     if _pending_frames:
         queue_path = os.path.join(frames_dir, QUEUE_FILE)
         with open(queue_path, "w") as f:
@@ -164,11 +199,7 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
 
 def dedup_to_events(sorted_results):
     """Collapse repeated detections of the same class, close in space and
-    time, across consecutive frames into a single event (keeps the highest-
-    confidence detection as the representative one, and counts how many
-    frames agreed — a simple multi-frame-consensus signal you can threshold
-    on downstream, e.g. require frame_count >= 2 before treating it as
-    confirmed rather than a single blurry-frame false positive)."""
+    time, across consecutive frames into a single event."""
     flat = [d for detections in sorted_results.values() for d in detections
             if d.get("location") and d.get("timestamp")]
     flat.sort(key=lambda d: d["timestamp"])
