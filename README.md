@@ -1,0 +1,1 @@
+if testing againts a single frame(i.e. a picture) we would need to keep the picture in a frames dir along with a frames_manifest.json which would contain the fake meta deta for the given frame, since without it, anpr would not get called and we won't have an acc-report.pdf or plates.json for that matter
