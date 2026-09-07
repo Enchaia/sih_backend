@@ -18,7 +18,7 @@ from config import (
 )
 from geo_utils import haversine_m
 from anpr import process_accident_frame, save_plates   # ← this whole line is new
-
+from generate_accident_report import generate_report   # ← builds acc-reports.pdf from plates.json + events.json
 
 # Thread-safe collection of frames that failed even after retries
 _pending_lock = threading.Lock()
@@ -233,6 +233,11 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
         save_plates(all_plates)
     # ---- end ANPR ----
     
+    # ---- Accident report PDF: regenerated every run, even if no new
+    # accidents were found this time (keeps acc-reports.pdf in sync with
+    # whatever's currently in events.json + plates.json) ----
+    generate_report()
+    # ---- end report ----
 
     if _pending_frames:
         queue_path = os.path.join(frames_dir, QUEUE_FILE)
