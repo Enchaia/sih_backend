@@ -55,6 +55,11 @@ CLASS_CONFIDENCE_THRESHOLDS = {
 }
 DEFAULT_CLASS_CONFIDENCE = 50 
 
+ANPR_DETECTION_CONFIDENCE = 40   # confidence floor sent to Roboflow for plate LOCATION
+ANPR_OVERLAP = 30                # same idea as OVERLAP, but for the ANPR model's own request
+ANPR_OCR_MIN_CONFIDENCE = 60     # min PaddleOCR confidence (0-100 pct) to trust a plate reading
+ANPR_CROP_PADDING_PX = 5         # pixels of padding added around the plate crop before OCR
+
 # Optional: relax every threshold slightly at night, since low light makes
 # even real detections score lower confidence than the same object in
 # daylight. Subtracted from the class threshold when timestamp hour is
@@ -125,6 +130,7 @@ FRAMES_DIR = "frames"
 EVENTS_DIR = "events"       # confirmed, deduplicated hazard events
 OUTPUT_JSON = "results.json"
 MANIFEST_JSON = "frames_manifest.json"
+PLATES_OUTPUT_JSON = "plates.json"   # ANPR plate-reading results
 
 # ---- Network gap handling (new) ----
 RETRY_ATTEMPTS = 3          # retry API call this many times before giving up
