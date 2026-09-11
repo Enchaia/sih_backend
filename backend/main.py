@@ -8,7 +8,7 @@ from services.delhi_otd import DelhiOTDError, fetch_live_buses
 
 load_dotenv()
 app = FastAPI(title='UrbanLens Live Transit API', version='1.0.0')
-app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:5173'], allow_credentials=False, allow_methods=['GET'], allow_headers=['*'])
+app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:5173','https://cuddly-robot-4qjv9xqrj74jcq6qw-5173.app.github.dev'], allow_credentials=False, allow_methods=['GET'], allow_headers=['*'])
 
 class LiveBus(BaseModel):
     bus_id: str | None
