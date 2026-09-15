@@ -41,7 +41,7 @@ def auto_brighten_clahe(frame, clip_limit=CLAHE_CLIP_LIMIT, tile_grid_size=CLAHE
     return cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
 
 
-def overlay_metadata(frame, timestamp_str, lat, lon, source, bus_id=None, zone=None):
+def overlay_metadata(frame, timestamp_str, lat, lon, bus_id=None, zone=None):
     """Draw metadata text on the frame."""
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.6
@@ -50,9 +50,8 @@ def overlay_metadata(frame, timestamp_str, lat, lon, source, bus_id=None, zone=N
 
     lines = [
         f"Time : {timestamp_str}",
-        f"Lat  : {lat:.6f}",
-        f"Lon  : {lon:.6f}",
-        f"Source: {source}",
+        f"Lat  : {lat:.4f}",
+        f"Lon  : {lon:.4f}",
     ]
     if bus_id:
         lines.append(f"Bus  : {bus_id}")
@@ -115,10 +114,9 @@ def extract_frames(video_path, output_dir=FRAMES_DIR, fps_target=FPS_TARGET,
             if draw_overlay and location:
                 lat = location.get("lat", 0.0)
                 lon = location.get("lon", 0.0)
-                source = location.get("source", "unknown")
                 bus_id = location.get("bus_id")
                 zone = location.get("zone")
-                enhanced = overlay_metadata(enhanced, timestamp_str, lat, lon, source, bus_id, zone)
+                enhanced = overlay_metadata(enhanced, timestamp_str, lat, lon, bus_id, zone)
 
             filename = f"frame_{saved_count:05d}.jpg"
             filepath = os.path.join(output_dir, filename)

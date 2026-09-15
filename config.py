@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # reads .env file and loads its values into environment variables/URL for the slug.
 MODEL_CONFIGS = [
-    {"name": "mix_class", "api_key": os.environ.get("ROBOFLOW_API_KEY_1"), "workspace": "sanskar-s-workspace", "project": "debr-road-water-pot-traffic", "version": 1},
+    {"name": "mix_class", "api_key": os.environ.get("ROBOFLOW_API_KEY_1"), "workspace": "mist-18ufe", "project": "waterlog_pothole_accident", "version": 1},
     {"name": "traffic_light", "api_key": os.environ.get("ROBOFLOW_API_KEY_2"), "workspace": "sibika", "project": "traffic-light-detection-yo9o4-3o2hz", "version": 2},
 ]
 
