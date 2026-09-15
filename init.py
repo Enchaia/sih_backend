@@ -49,7 +49,7 @@ def main():
         fps_target=args.fps,
         location_provider=provider,
         video_start_time=video_start,
-        draw_overlay=False
+        draw_overlay=True,
     )
 
 

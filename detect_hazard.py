@@ -14,25 +14,17 @@ from config import (
     NIGHT_CONFIDENCE_RELAXATION, DRIVER_ALERT_CLASSES,
     FRAMES_DIR, MANIFEST_JSON, OUTPUT_JSON, EVENTS_DIR,
     DEDUP_RADIUS_METERS, DEDUP_TIME_WINDOW_SEC,
-    RETRY_ATTEMPTS, QUEUE_FILE, PLATES_OUTPUT_JSON,   # ← added PLATES_OUTPUT_JSON
+    RETRY_ATTEMPTS, QUEUE_FILE, PLATES_OUTPUT_JSON,
 )
 from geo_utils import haversine_m
-from anpr import process_accident_frame, save_plates   # ← this whole line is new
-from generate_accident_report import generate_report   # ← builds acc-reports.pdf from plates.json + events.json
+from anpr import process_accident_frame, save_plates
+from generate_hazard_report import generate_hazard_report   # CHANGED — replaces generate_accident_report
 
-# Thread-safe collection of frames that failed even after retries
 _pending_lock = threading.Lock()
 _pending_frames = []
 
 
 def load_models():
-    """Load all configured Roboflow models once, return as a dict keyed by
-    name. Each model gets its OWN Roboflow client, since they may live under
-    different workspaces with different API keys.
-
-    Uses version.models() instead of the deprecated version.model attribute,
-    which can silently return None even when a trained model exists.
-    """
     models = {}
     for cfg in MODEL_CONFIGS:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -47,12 +39,7 @@ def load_models():
                 f"({cfg['workspace']}/{cfg['project']}/v{cfg['version']}). "
                 f"Check the Models tab on Roboflow for this project."
             )
-
-        # available is expected to be a list of trained model objects on
-        # this version — take the first one unless you have multiple and
-        # need to pick a specific one.
         models[cfg["name"]] = available[0]
-
     return models
 
 
@@ -67,7 +54,6 @@ def load_manifest(frames_dir):
 
 
 def is_nighttime(timestamp_str):
-    """Returns True if the given ISO timestamp falls between 7 PM and 6 AM."""
     if not timestamp_str:
         return False
     hour = datetime.fromisoformat(timestamp_str).hour
@@ -75,7 +61,6 @@ def is_nighttime(timestamp_str):
 
 
 def required_confidence_for(class_name, timestamp_str=None):
-    """Look up this class's minimum confidence, relaxed slightly at night."""
     threshold = CLASS_CONFIDENCE_THRESHOLDS.get(class_name, DEFAULT_CLASS_CONFIDENCE)
     if is_nighttime(timestamp_str):
         threshold -= NIGHT_CONFIDENCE_RELAXATION
@@ -83,10 +68,9 @@ def required_confidence_for(class_name, timestamp_str=None):
 
 
 def filter_by_class_confidence(detections, timestamp_str=None):
-    """Keep only detections that meet their OWN class's confidence bar."""
     kept = []
     for d in detections:
-        confidence_pct = d["confidence"] * 100  # Roboflow returns 0-1
+        confidence_pct = d["confidence"] * 100
         min_required = required_confidence_for(d["class"], timestamp_str)
         if confidence_pct >= min_required:
             d["threshold_used"] = min_required
@@ -95,8 +79,6 @@ def filter_by_class_confidence(detections, timestamp_str=None):
 
 
 def check_driver_alerts(detections):
-    """Fire an immediate driver alert for sign classes (stop, speed-limit),
-    independent of the hazard confidence table above."""
     for d in detections:
         class_name = d["class"]
         confidence_pct = d["confidence"] * 100
@@ -107,17 +89,10 @@ def check_driver_alerts(detections):
 
 
 def trigger_alert(message, class_name, confidence_pct):
-    """Replace with real audio/dashboard/buzzer logic once you have hardware."""
     print(f"🔔 DRIVER ALERT: {message} (confidence: {confidence_pct:.0f}%)")
 
 
 def predict_with_model(model_name, model, filepath, timestamp_str=None):
-    """Send one frame to ONE model with retries, filter by per-class
-    confidence, and check for driver-alert signs.
-
-    Returns (filename, model_name, detections). On final failure, the frame
-    is added to the pending queue and detections is empty.
-    """
     for attempt in range(RETRY_ATTEMPTS):
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -131,7 +106,6 @@ def predict_with_model(model_name, model, filepath, timestamp_str=None):
             check_driver_alerts(raw_detections)
             filtered = filter_by_class_confidence(raw_detections, timestamp_str)
 
-            # Only print when something actually cleared its threshold
             if filtered:
                 for d in filtered:
                     print(f"🚧 {d['class']} detected ({d['confidence']*100:.0f}%) "
@@ -140,13 +114,11 @@ def predict_with_model(model_name, model, filepath, timestamp_str=None):
             return os.path.basename(filepath), model_name, filtered
 
         except Exception as e:
-            # Keep failure visibility — these matter even in quiet mode
             print(f"Attempt {attempt+1}/{RETRY_ATTEMPTS} failed for {filepath} with {model_name}: {e}")
             if attempt < RETRY_ATTEMPTS - 1:
                 import time
-                time.sleep(2 ** attempt)  # exponential backoff
+                time.sleep(2 ** attempt)
 
-    # All retries failed → add to pending queue
     with _pending_lock:
         _pending_frames.append({"filepath": filepath, "model": model_name})
     print(f"Giving up on {filepath} with {model_name}. Added to pending queue.")
@@ -166,7 +138,6 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
         print(f"No frames found in '{frames_dir}'. Run extract_frames.py first.")
         return
 
-    total_tasks = len(filepaths) * len(models)
     all_results = {os.path.basename(fp): [] for fp in filepaths}
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -174,7 +145,7 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
         for fp in filepaths:
             filename = os.path.basename(fp)
             meta = manifest.get(filename, {})
-            frame_timestamp = meta.get("timestamp")  # now real, from extract_frames.py's manifest
+            frame_timestamp = meta.get("timestamp")
 
             for model_name, model in models.items():
                 future = executor.submit(predict_with_model, model_name, model, fp, frame_timestamp)
@@ -186,6 +157,7 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
             for d in detections:
                 d["event_id"] = str(uuid.uuid4())
                 d["frame_unique_id"] = meta.get("unique_id")
+                d["frame_filename"] = filename          # NEW — the exact metadata-overlaid frame file
                 d["timestamp"] = meta.get("timestamp")
                 d["location"] = meta.get("location")
                 d["lens_degraded"] = meta.get("lens_degraded")
@@ -198,6 +170,7 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
     total_detections = sum(len(v) for v in sorted_results.values())
 
     events = dedup_to_events(sorted_results)
+
     os.makedirs(EVENTS_DIR, exist_ok=True)
     events_path = os.path.join(EVENTS_DIR, "events.json")
     with open(events_path, "w") as f:
@@ -205,8 +178,7 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
 
     print(f"\nDone: {total_detections} detections, {len(events)} unique hazard events.")
 
-
-    # ---- ANPR: only for confirmed "Accident" events ----
+    # ---- ANPR: only for confirmed "Accident" events (unchanged) ----
     accident_events = [e for e in events if e["class"] == "Accident"]
     if accident_events:
         unique_id_to_filepath = {
@@ -232,11 +204,16 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
 
         save_plates(all_plates)
     # ---- end ANPR ----
-    
-    # ---- Accident report PDF: regenerated every run, even if no new
-    # accidents were found this time (keeps acc-reports.pdf in sync with
-    # whatever's currently in events.json + plates.json) ----
-    generate_report()
+
+    # ---- Hazard report PDF: only generated when this run actually found
+    # events — no empty PDF on a clean video. Every hazard class included,
+    # each row points at the SAME metadata-overlaid frame from FRAMES_DIR
+    # that was fed to the model, no separate annotated copy. ----
+    report_path = None
+    if events:
+        report_path = generate_hazard_report(events, frames_dir=frames_dir)
+    else:
+        print("No hazard events detected this run — skipping PDF report.")
     # ---- end report ----
 
     if _pending_frames:
@@ -245,10 +222,10 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
             json.dump(_pending_frames, f, indent=2)
         print(f"{len(_pending_frames)} frames failed and were queued for retry -> {queue_path}")
 
+    return events, report_path
+
 
 def dedup_to_events(sorted_results):
-    """Collapse repeated detections of the same class, close in space and
-    time, across consecutive frames into a single event."""
     flat = [d for detections in sorted_results.values() for d in detections
             if d.get("location") and d.get("timestamp")]
     flat.sort(key=lambda d: d["timestamp"])
@@ -273,12 +250,15 @@ def dedup_to_events(sorted_results):
                 matched.update({
                     "confidence": d["confidence"], "timestamp": d["timestamp"],
                     "location": d["location"], "representative_frame": d["frame_unique_id"],
+                    "frame_filename": d["frame_filename"],   # NEW
                 })
         else:
             events.append({
                 "event_id": d["event_id"], "class": d["class"], "confidence": d["confidence"],
                 "timestamp": d["timestamp"], "location": d["location"],
-                "representative_frame": d["frame_unique_id"], "frame_count": 1,
+                "representative_frame": d["frame_unique_id"],
+                "frame_filename": d["frame_filename"],   # NEW
+                "frame_count": 1,
             })
     return events
 

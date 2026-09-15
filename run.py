@@ -5,13 +5,8 @@ Wrapper for the road-hazard detection pipeline.
 CLI usage (unchanged):
     python run.py <video-file>
 
-Server usage (new):
+Server usage:
     uvicorn run:app --port 8001 --reload
-    -> exposes POST /api/run-demo for the frontend's "Run demo" upload button.
-
-Both paths call the exact same ensure_venv() / run_step() logic, so the
-actual pipeline (init.py -> extract_frames.py -> detect_hazard.py) is
-untouched.
 """
 
 import os
@@ -25,17 +20,22 @@ from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 BASE_DIR = Path(__file__).resolve().parent
 VENV_DIR = BASE_DIR / "venv"
 FRAMES_DIR = BASE_DIR / "frames"
+REPORTS_DIR = BASE_DIR / "reports"
 UPLOADS_DIR = BASE_DIR / "uploads"
 EVENTS_JSON = BASE_DIR / "events" / "events.json"
 PLATES_JSON = BASE_DIR / "plates.json"
+HAZARD_REPORT_PDF = BASE_DIR / "reports" / "hazard-report.pdf"
 INIT_SCRIPT = BASE_DIR / "init.py"
 DETECT_SCRIPT = BASE_DIR / "detect_hazard.py"
-FRAMES_WAIT_TIMEOUT = 60  # seconds
+FRAMES_WAIT_TIMEOUT = 60
+
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8001")
 
 
 def venv_python() -> Path:
@@ -71,10 +71,15 @@ def wait_for_frames_dir():
 
 
 def run_pipeline_for_video(video_path: Path) -> dict:
-    """Same three steps run.py always did — video -> init.py -> wait -> detect_hazard.py —
-    just returned as data instead of printed to a terminal."""
+    """video -> init.py (frames with metadata overlaid) -> wait -> detect_hazard.py
+    (writes events.json and, only if events were found, reports/hazard-report.pdf)."""
     ensure_venv()
     python_exe = venv_python()
+
+    # Report PDF from a previous run shouldn't leak into this run's response
+    # if this run detects nothing.
+    if HAZARD_REPORT_PDF.exists():
+        HAZARD_REPORT_PDF.unlink()
 
     run_step(python_exe, INIT_SCRIPT, "--video", str(video_path))
     wait_for_frames_dir()
@@ -82,7 +87,22 @@ def run_pipeline_for_video(video_path: Path) -> dict:
 
     events = json.loads(EVENTS_JSON.read_text()) if EVENTS_JSON.exists() else []
     plates = json.loads(PLATES_JSON.read_text()) if PLATES_JSON.exists() else []
-    return {"events": events, "plates": plates}
+
+    # Attach a browsable URL to each event, pointing at the exact frame
+    # (already has time/lat/lon/bus/zone burned into it) used for detection.
+    for event in events:
+        frame_filename = event.get("frame_filename")
+        if frame_filename:
+            event["frame_url"] = f"{PUBLIC_BASE_URL}/frames/{frame_filename}"
+
+    result = {"events": events, "plates": plates}
+
+    # Only surface a report_url if detect_hazard.py actually wrote the PDF
+    # (i.e. this run found at least one hazard event).
+    if HAZARD_REPORT_PDF.exists():
+        result["report_url"] = f"{PUBLIC_BASE_URL}/reports/hazard-report.pdf"
+
+    return result
 
 
 # ---------------- CLI mode (unchanged behaviour) ----------------
@@ -108,18 +128,27 @@ def main():
         sys.exit(str(exc))
 
     print(f"\nPipeline complete. {len(result['events'])} event(s), {len(result['plates'])} plate(s).")
+    if result.get("report_url"):
+        print(f"Report: {result['report_url']}")
+    else:
+        print("No hazards detected — no report generated.")
 
 
-# ---------------- Server mode (new, for frontend upload) ----------------
+# ---------------- Server mode (for frontend upload) ----------------
 
 app = FastAPI(title="UrbanLens Demo Runner")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
     allow_credentials=False,
-    allow_methods=["POST"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+FRAMES_DIR.mkdir(exist_ok=True)
+REPORTS_DIR.mkdir(exist_ok=True)
+app.mount("/frames", StaticFiles(directory=FRAMES_DIR), name="frames")
+app.mount("/reports", StaticFiles(directory=REPORTS_DIR), name="reports")
 
 
 @app.post("/api/run-demo")
@@ -133,7 +162,6 @@ async def run_demo_endpoint(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, out)
 
     try:
-        # subprocess.run() blocks, so run it off the event loop
         result = await run_in_threadpool(run_pipeline_for_video, dest)
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc

@@ -126,11 +126,14 @@ ROUTE_WAYPOINTS = [
 ]
 
 # ---- Storage ----
-FRAMES_DIR = "frames"
-EVENTS_DIR = "events"       # confirmed, deduplicated hazard events
+FRAMES_DIR = "frames"                # metadata-overlaid frames already live here — nothing new
+EVENTS_DIR = "events"
+REPORTS_DIR = "reports"              # NEW — where hazard-report.pdf is written
 OUTPUT_JSON = "results.json"
 MANIFEST_JSON = "frames_manifest.json"
-PLATES_OUTPUT_JSON = "plates.json"   # ANPR plate-reading results
+PLATES_OUTPUT_JSON = "plates.json"
+HAZARD_REPORT_PDF = "hazard-report.pdf"   # NEW — always-regenerated report, all hazard classes
+
 
 # ---- Network gap handling (new) ----
 RETRY_ATTEMPTS = 3          # retry API call this many times before giving up
