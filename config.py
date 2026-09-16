@@ -45,11 +45,8 @@ MAX_WORKERS = 8  # total parallel API calls across BOTH models combined
 API_REQUEST_CONFIDENCE = 25  # low floor sent to Roboflow itself — filtering happens locally after
  
 CLASS_CONFIDENCE_THRESHOLDS = {
-    "Pothole": 65,
-    "water_logging": 60,
-    "debris": 55,
-    "garbage": 60,
-    "garbage-overflow": 60,
+    "Pothole": 60,
+    "water_logging": 55,
     "Accident": 40,
     "traffic_light": 60,
 }
@@ -66,7 +63,7 @@ ANPR_CROP_PADDING_PX = 5         # pixels of padding added around the plate crop
 # within NIGHT_HOURS. Tune this after watching real night footage.
 
 NIGHT_HOURS = range(19, 6)  # 7 PM to 6 AM, wraps past midnight — handled in code, not by this range directly
-NIGHT_CONFIDENCE_RELAXATION = 10
+NIGHT_CONFIDENCE_RELAXATION = 2
  
 # ---- Driver alert signs (new) ----
 # These aren't "hazards" in the pothole/accident sense — they're regulatory

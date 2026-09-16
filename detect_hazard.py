@@ -18,13 +18,14 @@ from config import (
 )
 from geo_utils import haversine_m
 from anpr import process_accident_frame, save_plates
-from generate_hazard_report import generate_hazard_report   # CHANGED — replaces generate_accident_report
+from generate_hazard_report import generate_hazard_report
 
 _pending_lock = threading.Lock()
 _pending_frames = []
 
 
 def load_models():
+    """Load all configured Roboflow models once, return as a dict keyed by name."""
     models = {}
     for cfg in MODEL_CONFIGS:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -54,6 +55,7 @@ def load_manifest(frames_dir):
 
 
 def is_nighttime(timestamp_str):
+    """Returns True if the given ISO timestamp falls between 7 PM and 6 AM."""
     if not timestamp_str:
         return False
     hour = datetime.fromisoformat(timestamp_str).hour
@@ -61,6 +63,8 @@ def is_nighttime(timestamp_str):
 
 
 def required_confidence_for(class_name, timestamp_str=None):
+    """Look up this class's minimum confidence threshold from
+    CLASS_CONFIDENCE_THRESHOLDS (config.py), relaxed slightly at night."""
     threshold = CLASS_CONFIDENCE_THRESHOLDS.get(class_name, DEFAULT_CLASS_CONFIDENCE)
     if is_nighttime(timestamp_str):
         threshold -= NIGHT_CONFIDENCE_RELAXATION
@@ -68,9 +72,15 @@ def required_confidence_for(class_name, timestamp_str=None):
 
 
 def filter_by_class_confidence(detections, timestamp_str=None):
+    """THIS is what stops the pipeline from reporting every low-confidence
+    box Roboflow returns. API_REQUEST_CONFIDENCE (config.py) is only a low
+    floor sent to Roboflow itself so nothing borderline is lost at the
+    network level — the REAL cutoff is per-class here, e.g. Pothole needs
+    >=65%, water_logging >=60%, Accident >=40%, etc. Anything below its
+    class's threshold is dropped and never becomes an event."""
     kept = []
     for d in detections:
-        confidence_pct = d["confidence"] * 100
+        confidence_pct = d["confidence"] * 100  # Roboflow returns 0-1
         min_required = required_confidence_for(d["class"], timestamp_str)
         if confidence_pct >= min_required:
             d["threshold_used"] = min_required
@@ -79,6 +89,8 @@ def filter_by_class_confidence(detections, timestamp_str=None):
 
 
 def check_driver_alerts(detections):
+    """Fire an immediate driver alert for sign classes (stop, speed-limit),
+    independent of the hazard confidence table above."""
     for d in detections:
         class_name = d["class"]
         confidence_pct = d["confidence"] * 100
@@ -93,6 +105,12 @@ def trigger_alert(message, class_name, confidence_pct):
 
 
 def predict_with_model(model_name, model, filepath, timestamp_str=None):
+    """Send one frame to ONE model with retries, filter by per-class
+    confidence, and check for driver-alert signs.
+
+    Returns (filename, model_name, detections). On final failure, the frame
+    is added to the pending queue and detections is empty.
+    """
     for attempt in range(RETRY_ATTEMPTS):
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -104,6 +122,7 @@ def predict_with_model(model_name, model, filepath, timestamp_str=None):
                 d["source_model"] = model_name
 
             check_driver_alerts(raw_detections)
+            # ---- confidence gate applied here, before anything becomes an event ----
             filtered = filter_by_class_confidence(raw_detections, timestamp_str)
 
             if filtered:
@@ -157,7 +176,7 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
             for d in detections:
                 d["event_id"] = str(uuid.uuid4())
                 d["frame_unique_id"] = meta.get("unique_id")
-                d["frame_filename"] = filename          # NEW — the exact metadata-overlaid frame file
+                d["frame_filename"] = filename
                 d["timestamp"] = meta.get("timestamp")
                 d["location"] = meta.get("location")
                 d["lens_degraded"] = meta.get("lens_degraded")
@@ -178,7 +197,7 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
 
     print(f"\nDone: {total_detections} detections, {len(events)} unique hazard events.")
 
-    # ---- ANPR: only for confirmed "Accident" events (unchanged) ----
+    # ---- ANPR: only for confirmed "Accident" events ----
     accident_events = [e for e in events if e["class"] == "Accident"]
     if accident_events:
         unique_id_to_filepath = {
@@ -206,9 +225,7 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
     # ---- end ANPR ----
 
     # ---- Hazard report PDF: only generated when this run actually found
-    # events — no empty PDF on a clean video. Every hazard class included,
-    # each row points at the SAME metadata-overlaid frame from FRAMES_DIR
-    # that was fed to the model, no separate annotated copy. ----
+    # events (all classes, using the confidence-filtered list above) ----
     report_path = None
     if events:
         report_path = generate_hazard_report(events, frames_dir=frames_dir)
@@ -226,6 +243,10 @@ def run_detection(frames_dir=FRAMES_DIR, output_json=OUTPUT_JSON, max_workers=MA
 
 
 def dedup_to_events(sorted_results):
+    """Collapse repeated detections of the same class, close in space and
+    time, across consecutive frames into a single event. Only operates on
+    detections that already passed filter_by_class_confidence — nothing
+    below its class threshold ever reaches this stage."""
     flat = [d for detections in sorted_results.values() for d in detections
             if d.get("location") and d.get("timestamp")]
     flat.sort(key=lambda d: d["timestamp"])
@@ -250,14 +271,14 @@ def dedup_to_events(sorted_results):
                 matched.update({
                     "confidence": d["confidence"], "timestamp": d["timestamp"],
                     "location": d["location"], "representative_frame": d["frame_unique_id"],
-                    "frame_filename": d["frame_filename"],   # NEW
+                    "frame_filename": d["frame_filename"],
                 })
         else:
             events.append({
                 "event_id": d["event_id"], "class": d["class"], "confidence": d["confidence"],
                 "timestamp": d["timestamp"], "location": d["location"],
                 "representative_frame": d["frame_unique_id"],
-                "frame_filename": d["frame_filename"],   # NEW
+                "frame_filename": d["frame_filename"],
                 "frame_count": 1,
             })
     return events
