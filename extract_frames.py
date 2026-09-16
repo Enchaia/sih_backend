@@ -46,7 +46,7 @@ def overlay_metadata(frame, timestamp_str, lat, lon, bus_id=None, zone=None):
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.6
     thickness = 2
-    color = (0, 255, 0)  # green
+    color = (0, 0, 255)  # red
 
     lines = [
         f"Time : {timestamp_str}",
