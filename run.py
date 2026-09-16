@@ -33,7 +33,11 @@ PLATES_JSON = BASE_DIR / "plates.json"
 HAZARD_REPORT_PDF = BASE_DIR / "reports" / "hazard-report.pdf"
 INIT_SCRIPT = BASE_DIR / "init.py"
 DETECT_SCRIPT = BASE_DIR / "detect_hazard.py"
+PREPARE_IMAGE_SCRIPT = BASE_DIR / "prepare_image.py"
 FRAMES_WAIT_TIMEOUT = 60
+
+VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi")
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8001")
 
@@ -70,9 +74,11 @@ def wait_for_frames_dir():
     print(f"{FRAMES_DIR} found.")
 
 
-def run_pipeline_for_video(video_path: Path) -> dict:
-    """video -> init.py (frames with metadata overlaid) -> wait -> detect_hazard.py
-    (writes events.json and, only if events were found, reports/hazard-report.pdf)."""
+def run_pipeline_for_file(input_path: Path) -> dict:
+    """video -> init.py (extract + overlay frames) -> wait -> detect_hazard.py
+    photo -> prepare_image.py (single frame, no extraction) -> detect_hazard.py
+    Either way, writes events.json and, only if events were found,
+    reports/hazard-report.pdf."""
     ensure_venv()
     python_exe = venv_python()
 
@@ -81,8 +87,20 @@ def run_pipeline_for_video(video_path: Path) -> dict:
     if HAZARD_REPORT_PDF.exists():
         HAZARD_REPORT_PDF.unlink()
 
-    run_step(python_exe, INIT_SCRIPT, "--video", str(video_path))
-    wait_for_frames_dir()
+    # Clear stale frames from a previous run so leftover files never get
+    # re-detected alongside this run's frame(s) — extract_frames.py and
+    # prepare_image.py both overwrite frame_NNNNN.* sequentially but never
+    # delete leftovers from a PRIOR run that produced more frames.
+    if FRAMES_DIR.exists():
+        shutil.rmtree(FRAMES_DIR)
+
+    ext = input_path.suffix.lower()
+    if ext in IMAGE_EXTENSIONS:
+        run_step(python_exe, PREPARE_IMAGE_SCRIPT, "--image", str(input_path))
+    else:
+        run_step(python_exe, INIT_SCRIPT, "--video", str(input_path))
+        wait_for_frames_dir()
+
     run_step(python_exe, DETECT_SCRIPT)
 
     events = json.loads(EVENTS_JSON.read_text()) if EVENTS_JSON.exists() else []
@@ -109,13 +127,15 @@ def run_pipeline_for_video(video_path: Path) -> dict:
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit(f"Usage: python {Path(sys.argv[0]).name} <video-file>")
+        sys.exit(f"Usage: python {Path(sys.argv[0]).name} <video-or-photo-file>")
 
-    video_path = Path(sys.argv[1])
-    if not video_path.is_file():
-        sys.exit(f"Error: video file not found: {video_path}")
+    input_path = Path(sys.argv[1])
+    if not input_path.is_file():
+        sys.exit(f"Error: file not found: {input_path}")
 
-    for required in (INIT_SCRIPT, DETECT_SCRIPT):
+    required_scripts = (DETECT_SCRIPT,)
+    required_scripts += (PREPARE_IMAGE_SCRIPT,) if input_path.suffix.lower() in IMAGE_EXTENSIONS else (INIT_SCRIPT,)
+    for required in required_scripts:
         if not required.exists():
             sys.exit(f"Error: missing required script: {required}")
 
@@ -123,7 +143,7 @@ def main():
         print("Warning: no .env file found. Roboflow API keys are read from it.")
 
     try:
-        result = run_pipeline_for_video(video_path)
+        result = run_pipeline_for_file(input_path)
     except RuntimeError as exc:
         sys.exit(str(exc))
 
@@ -153,8 +173,9 @@ app.mount("/reports", StaticFiles(directory=REPORTS_DIR), name="reports")
 
 @app.post("/api/run-demo")
 async def run_demo_endpoint(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith((".mp4", ".mov", ".avi")):
-        raise HTTPException(400, "Please upload a .mp4, .mov, or .avi file.")
+    allowed = VIDEO_EXTENSIONS + IMAGE_EXTENSIONS
+    if not file.filename.lower().endswith(allowed):
+        raise HTTPException(400, "Please upload a video (.mp4/.mov/.avi) or a photo (.jpg/.jpeg/.png).")
 
     UPLOADS_DIR.mkdir(exist_ok=True)
     dest = UPLOADS_DIR / file.filename
@@ -162,7 +183,7 @@ async def run_demo_endpoint(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, out)
 
     try:
-        result = await run_in_threadpool(run_pipeline_for_video, dest)
+        result = await run_in_threadpool(run_pipeline_for_file, dest)
     except RuntimeError as exc:
         raise HTTPException(500, str(exc)) from exc
 
